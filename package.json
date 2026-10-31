@@ -1,0 +1,25 @@
+{
+  "name": "agent-desktop",
+  "version": "0.1.0",
+  "description": "OS-level desktop control CLI for agents: screenshots, mouse, keyboard and windows (Windows backend, no native deps)",
+  "license": "MIT",
+  "bin": {
+    "agent-desktop": "bin/agent-desktop.js"
+  },
+  "files": [
+    "bin",
+    "src"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.js\"",
+    "test:smoke": "node --test test/windows-smoke.test.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/alexeygrigorev/agent-desktop.git"
+  },
+  "keywords": ["desktop", "automation", "agent", "screenshot", "sendinput", "windows"]
+}

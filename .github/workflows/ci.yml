@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    name: Unit tests (ubuntu, node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: [22, 24]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - run: npm test
+
+  windows-smoke:
+    name: Windows smoke (windows-latest)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Windows PowerShell version
+        shell: powershell
+        run: $PSVersionTable.PSVersion
+      - name: All tests (unit + Windows smoke)
+        run: npm test
+      - name: CLI smoke
+        shell: pwsh
+        run: |
+          node bin/agent-desktop.js monitors
+          node bin/agent-desktop.js --json screenshot --all --output "$env:RUNNER_TEMP/agent-desktop/out/all.png"
+          node bin/agent-desktop.js windows
+          node bin/agent-desktop.js move 10 10
+          node bin/agent-desktop.js cursor
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-screenshot
+          path: ${{ runner.temp }}/agent-desktop/out/
+          if-no-files-found: ignore
