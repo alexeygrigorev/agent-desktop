@@ -106,3 +106,16 @@ test('screenshot --window and posted input use the same window-relative pixels',
   assert.deepEqual(moved.point, { x: win.rect.x + 20, y: win.rect.y + 30 });
   console.log(JSON.stringify(moved));
 });
+
+test('key works end to end through the helper (regression: "no key combos given")', { skip }, () => {
+  const res = cli('key', 'shift', 'shift+f24');
+  assert.equal(res.combos, 2);
+  assert.equal(res.input, 'sendinput');
+});
+
+test('focus with a bare number accepts a pid and an hwnd', { skip }, () => {
+  const win = cli('windows').windows.find((w) => !w.minimized && w.rect.width > 50);
+  assert.ok(win, 'a visible window to test with');
+  assert.equal(cli('focus', String(win.hwnd)).window.hwnd, win.hwnd);
+  assert.equal(cli('focus', String(win.pid)).window.pid, win.pid);
+});

@@ -114,8 +114,10 @@ test('key parses every combo up front', () => {
   assert.throws(() => req(['key', 'ctrl+nope']), UsageError);
 });
 
-test('focus target: pid, title, hwnd', () => {
-  assert.deepEqual(req(['focus', '4242']).params, { pid: 4242 });
+test('focus target: bare number, prefixes, title, hwnd', () => {
+  assert.deepEqual(req(['focus', '4242']).params, { id: 4242 });
+  assert.deepEqual(req(['focus', 'pid:4242']).params, { pid: 4242 });
+  assert.deepEqual(req(['focus', 'hwnd:1001']).params, { hwnd: 1001 });
   assert.deepEqual(req(['focus', 'Google Chrome']).params, { title: 'Google Chrome' });
   assert.deepEqual(req(['focus', '2048', '--title']).params, { title: '2048' });
   assert.deepEqual(req(['focus', '1001', '--hwnd']).params, { hwnd: 1001 });
@@ -329,4 +331,24 @@ test('doctor: JSON facts plus diagnosis, and a readable text report', async () =
   assert.match(text, /screen capture \(BitBlt\): FAILED \(The handle is invalid\)/);
   const ok = JSON.parse((await run(['--json', 'doctor'])).stdout);
   assert.equal(ok.status, 'ok');
+});
+
+test('focus with a bare number tries pid first, then hwnd (live bug: hwnd was sent as pid)', async () => {
+  const byPid = JSON.parse((await run(['--json', 'focus', '777'])).stdout);
+  assert.equal(byPid.window.hwnd, 1002);
+  const byHwnd = JSON.parse((await run(['--json', 'focus', '1002'])).stdout);
+  assert.equal(byHwnd.ok, true);
+  assert.equal(byHwnd.window.pid, 777);
+});
+
+test('key request JSON shape: combos is an array of arrays of {name, vk, extended}', () => {
+  // The Windows helper must read these JSON arrays as IList (they arrive as
+  // object[]), see the regression check in windows-backend.test.js.
+  const { encodeRequest } = require('../src/backends/windows');
+  const { params } = req(['key', 'ctrl+shift+t', 'enter']);
+  const wire = JSON.parse(Buffer.from(encodeRequest({ command: 'key', ...params }), 'base64').toString('utf8'));
+  assert.ok(Array.isArray(wire.combos));
+  assert.ok(wire.combos.every(Array.isArray));
+  assert.deepEqual(wire.combos[0][2], { name: 't', vk: 0x54, extended: false });
+  assert.deepEqual(wire.combos[1], [{ name: 'enter', vk: 0x0d, extended: false }]);
 });

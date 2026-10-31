@@ -221,6 +221,9 @@ namespace AgentDesktop
         }
 
         // ---- request helpers ------------------------------------------------
+        // JavaScriptSerializer.DeserializeObject yields Dictionary<string, object>
+        // for JSON objects and object[] for JSON arrays: read arrays as IList,
+        // never ArrayList.
 
         static object Get(Dictionary<string, object> req, string key)
         {
@@ -1041,7 +1044,7 @@ namespace AgentDesktop
         // and released in reverse.
         static Dictionary<string, object> Key(Dictionary<string, object> req)
         {
-            ArrayList combos = Get(req, "combos") as ArrayList;
+            IList combos = Get(req, "combos") as IList;
             if (combos == null || combos.Count == 0) throw new ArgumentException("no key combos given");
             Dictionary<string, object> result = RunInput(req, KeySend, KeyPost);
             result["combos"] = combos.Count;
@@ -1051,12 +1054,12 @@ namespace AgentDesktop
         static Dictionary<string, object> KeySend(Dictionary<string, object> req, WindowData target)
         {
             FocusForKeys(target);
-            ArrayList combos = (ArrayList)Get(req, "combos");
+            IList combos = (IList)Get(req, "combos");
             int delay = Math.Max(0, Int(req, "delay", 30));
             for (int c = 0; c < combos.Count; c++)
             {
                 if (c > 0 && delay > 0) Thread.Sleep(delay);
-                ArrayList keys = (ArrayList)combos[c];
+                IList keys = (IList)combos[c];
                 List<INPUT> inputs = new List<INPUT>();
                 for (int i = 0; i < keys.Count; i++)
                 {
@@ -1085,13 +1088,13 @@ namespace AgentDesktop
         static Dictionary<string, object> KeyPost(Dictionary<string, object> req, WindowData target)
         {
             IntPtr child = KeyTarget(req, target);
-            ArrayList combos = (ArrayList)Get(req, "combos");
+            IList combos = (IList)Get(req, "combos");
             int delay = Math.Max(0, Int(req, "delay", 30));
             bool modifiers = false;
             for (int c = 0; c < combos.Count; c++)
             {
                 if (c > 0 && delay > 0) Thread.Sleep(delay);
-                ArrayList keys = (ArrayList)combos[c];
+                IList keys = (IList)combos[c];
                 bool alt = false;
                 foreach (object o in keys) if (Int((Dictionary<string, object>)o, "vk", 0) == 0x12) alt = true;
                 if (keys.Count > 1) foreach (object o in keys) if (IsModifierVk(Int((Dictionary<string, object>)o, "vk", 0))) modifiers = true;
@@ -1218,14 +1221,15 @@ namespace AgentDesktop
             List<WindowData> all = EnumTopWindows(false);
             if (Has(req, "id"))
             {
-                // A bare number from --window: a window handle if one matches,
-                // otherwise a process id.
+                // A bare number: a process id if that process has a window,
+                // otherwise a window handle.
                 long id = Convert.ToInt64(Get(req, "id"));
-                foreach (WindowData w in all) if (w.Handle.ToInt64() == id) matches.Add(w);
-                if (matches.Count > 0) return matches;
                 Dictionary<string, object> byPid = new Dictionary<string, object>();
                 byPid["pid"] = id;
-                return FindWindows(byPid);
+                matches = FindWindows(byPid);
+                if (matches.Count > 0) return matches;
+                foreach (WindowData w in all) if (w.Handle.ToInt64() == id) matches.Add(w);
+                return matches;
             }
             if (Has(req, "hwnd"))
             {

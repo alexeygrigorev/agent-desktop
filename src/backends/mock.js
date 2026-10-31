@@ -39,8 +39,8 @@ function createMockBackend({ interactive = true } = {}) {
     if (target.hwnd !== undefined) matches = windows.filter((w) => w.hwnd === target.hwnd);
     else if (target.pid !== undefined) matches = windows.filter((w) => w.pid === target.pid);
     else if (target.id !== undefined) {
-      matches = windows.filter((w) => w.hwnd === target.id);
-      if (matches.length === 0) matches = windows.filter((w) => w.pid === target.id);
+      matches = windows.filter((w) => w.pid === target.id);
+      if (matches.length === 0) matches = windows.filter((w) => w.hwnd === target.id);
     } else matches = windows.filter((w) => w.title.toLowerCase().includes(target.title.toLowerCase()));
     if (matches.length === 0) throw new Error('no visible window matches');
     return { window: matches[0], matches: matches.length };

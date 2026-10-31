@@ -35,8 +35,10 @@ Commands:
                                  Press key combos, e.g. ctrl+shift+t, alt+f4, enter.
   windows [--filter TEXT] [--all]
                                  List top-level windows (Z-order, topmost first).
-  focus <TITLE-SUBSTRING|PID> [--title] [--hwnd]
+  focus <TITLE-SUBSTRING|PID|HWND> [--title] [--hwnd]
                                  Restore and bring a window to the foreground.
+                                 A bare number is a pid if that process has a
+                                 window, else an hwnd.
   monitors                       List monitors and the virtual-screen bounds.
   doctor                         Diagnose the session (RDP/console, foreground,
                                  input desktop, capture and input methods).
@@ -55,8 +57,8 @@ A screenshot reports its "origin"; image pixel (px,py) is screen point
 (px+origin.x, py+origin.y), which "--offset ORIGIN_X,ORIGIN_Y" applies for you.
 
 --window W targets one window: W is a title substring, a pid or hwnd (bare
-number: hwnd if one matches, else pid), or explicit "hwnd:N", "pid:N",
-"title:TEXT". With --window, X Y are pixels of "screenshot --window W".
+number: pid if that process has a window, else hwnd), or explicit "hwnd:N",
+"pid:N", "title:TEXT". With --window, X Y are pixels of "screenshot --window W".
 --input auto|sendinput|post: auto uses SendInput, and posts window messages
 to the --window target when there is no interactive display.
 `;
@@ -182,8 +184,8 @@ function parseNonNegative(value, what, dflt) {
   return n;
 }
 
-// --window value -> { hwnd } | { pid } | { title } | { id } (bare number:
-// the backend tries it as an hwnd, then as a pid).
+// --window / focus value -> { hwnd } | { pid } | { title } | { id } (bare
+// number: the backend tries it as a pid, then as an hwnd).
 function parseWindowTarget(value) {
   const v = String(value);
   let m = /^hwnd:(0x[0-9a-f]+|\d+)$/i.exec(v);
@@ -338,13 +340,13 @@ function buildRequest(parsed, ctx = {}) {
       expectPositionals(pos, 0, 0, 'windows [--filter TEXT] [--all]');
       return { method: 'windows', params: { all: Boolean(opt.all) } };
     case 'focus': {
-      expectPositionals(pos, 1, 1, 'focus <TITLE-SUBSTRING|PID> [--title] [--hwnd]');
+      expectPositionals(pos, 1, 1, 'focus <TITLE-SUBSTRING|PID|HWND> [--title] [--hwnd]');
       if (opt.title && opt.hwnd) throw new UsageError('use either --title or --hwnd, not both');
       const target = pos[0];
       if (opt.hwnd) return { method: 'focus', params: { hwnd: parseInteger(target, 'HWND') } };
-      if (!opt.title && /^\d+$/.test(target)) return { method: 'focus', params: { pid: Number(target) } };
       if (target.trim() === '') throw new UsageError('window title must not be empty');
-      return { method: 'focus', params: { title: target } };
+      if (opt.title) return { method: 'focus', params: { title: target } };
+      return { method: 'focus', params: parseWindowTarget(target) };
     }
     case 'monitors':
       expectPositionals(pos, 0, 0, 'monitors');

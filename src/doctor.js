@@ -9,8 +9,9 @@ const SUPPRESS_HINT =
   '(then reconnect), or keep the RDP window restored (not minimized).';
 
 const WINDOW_HINT =
-  'Until then, use window-level fallbacks: `screenshot --window <title|pid|hwnd>` (PrintWindow) and ' +
-  '`click/move/scroll/type/key --window <title|pid|hwnd>` (input posted to the window; coordinates are pixels of the --window screenshot).';
+  'Chrome (and other Chromium/Electron/GPU apps) ignore posted input and need an interactive display: fix the display first. ' +
+  'Until then, `screenshot --window <title|pid|hwnd>` (PrintWindow) still captures windows, and ' +
+  '`click/move/scroll/type/key --window ...` posts input that only classic Win32 apps accept.';
 
 function diagnose(facts) {
   const problems = [];

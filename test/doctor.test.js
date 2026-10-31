@@ -27,6 +27,7 @@ test('minimized RDP client (live case: no foreground, BitBlt "handle is invalid"
   assert.ok(d.problems.some((p) => /BitBlt\) fails: The handle is invalid/.test(p)));
   assert.ok(d.hints.some((h) => /RemoteDesktop_SuppressWhenMinimized \/t REG_DWORD \/d 2/.test(h)));
   assert.ok(d.hints.some((h) => /--window/.test(h)));
+  assert.ok(d.hints.some((h) => /Chrome .*ignore posted input.*interactive display/.test(h)));
 });
 
 test('disconnected session', () => {

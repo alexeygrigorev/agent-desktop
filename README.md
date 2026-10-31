@@ -14,10 +14,12 @@ focusing windows. It covers what browser automation cannot reach:
   to a click with no scaling.
 - Every command accepts `--json` and prints a single JSON object for agents
   to read.
-- Works even when nothing is being displayed, for example a minimized
-  Remote Desktop client. Screenshots fall back to PrintWindow, and input can
-  be posted straight to a window with `--window`. `agent-desktop doctor`
-  explains what state the session is in.
+- `agent-desktop doctor` tells you whether the session can be controlled.
+  The common failure is a minimized Remote Desktop client. When nothing is
+  being displayed, screenshots fall back to PrintWindow, and input can be
+  posted to a window with `--window`. Posted input works for classic Win32
+  apps but **not for Chrome**, which needs an interactive display. See
+  [Window targets](#window-targets-and-no-display-sessions).
 
 The backend is pluggable (`src/backends/`). Windows is the only real one so
 far. A `mock` backend handles tests and dry runs on any OS.
@@ -242,13 +244,14 @@ agent-desktop --json windows --filter notepad
 ### focus
 
 ```text
-agent-desktop focus <TITLE-SUBSTRING|PID> [--title] [--hwnd]
+agent-desktop focus <TITLE-SUBSTRING|PID|HWND> [--title] [--hwnd]
 ```
 
-Restores the window if it is minimized and brings it to the foreground. An
-all-digit target is a PID, anything else is a case-insensitive title
-substring. `--title` treats digits as a title, and `--hwnd` takes a window
-handle from `windows`. When several windows match, the topmost one wins, and
+Restores the window if it is minimized and brings it to the foreground.
+A bare number is a PID if that process has a visible window, and otherwise
+a window handle from `windows`. Anything else is a case-insensitive title
+substring. The explicit forms `pid:N`, `hwnd:N` and `title:TEXT` also work.
+`--title` treats digits as a title, and `--hwnd` forces a handle. When several windows match, the topmost one wins, and
 the output reports how many matched. Focusing works from a background
 process: the helper uses `AttachThreadInput` and falls back to an Alt-key
 tap to get past Windows' foreground lock.
@@ -263,7 +266,7 @@ agent-desktop focus 132456 --hwnd
 
 ```text
 --window W     W = title substring | pid | hwnd   (also explicit hwnd:N, pid:N, title:TEXT;
-               a bare number is tried as an hwnd first, then as a pid)
+               a bare number is tried as a pid first, then as an hwnd)
 --input auto|sendinput|post
 ```
 
@@ -293,18 +296,30 @@ The input path is chosen by `--input`:
   focused child, or to the child under `--at X,Y` (window-relative).
 - `sendinput`: never fall back.
 
-Posted input has limits. The app does not see a real cursor, and posted
-modifiers do not change its keyboard state. That means plain clicks, text
-and keys such as Enter, Tab and the arrows work, but shortcuts like
-`ctrl+t` may reach the app as a bare `t`; a warning in the output says so.
-Without `--window`, input in a no-display session also gets a warning,
-because SendInput may report success while doing nothing.
+**Posted input has limits:**
+
+- **Chrome ignores it.** In a live test with a non-rendering RDP session,
+  posting a click on Chrome's omnibox and then typing into
+  `Chrome_WidgetWin_1` had no effect. Chrome, like other Chromium,
+  Electron and GPU/DirectComposition apps, needs an interactive display and
+  real input. For Chrome, fix the display (see [doctor](#doctor)) and use
+  normal SendInput.
+- **Classic Win32 apps** with standard controls (Notepad-style edit boxes,
+  dialogs) usually accept posted clicks, text and keys.
+- **Modifiers are not applied.** The app sees no real cursor, and posted
+  modifiers do not change its keyboard state, so shortcuts like `ctrl+t`
+  may arrive as a bare `t`. The output includes a warning when this applies.
+
+`screenshot --window` (PrintWindow) is still useful without a display: it
+shows what a window contains. Without `--window`, input in a no-display
+session gets a warning, because SendInput may report success while doing
+nothing.
 
 ```powershell
-agent-desktop --json screenshot --window "Google Chrome" -o shots\chrome.png
+agent-desktop --json screenshot --window "Notepad" -o shots\notepad.png
 #   -> "method":"printwindow","origin":{"x":120,"y":40},"window":{"hwnd":132456,...}
-agent-desktop click 1212 655 --window hwnd:132456          # pixel from chrome.png
-agent-desktop type "chrome://extensions" --window hwnd:132456 --at 400,60
+agent-desktop click 300 200 --window hwnd:132456           # pixel from notepad.png
+agent-desktop type "hello" --window hwnd:132456
 agent-desktop key enter --window hwnd:132456 --input post
 ```
 
@@ -337,7 +352,8 @@ hints:
   - On the machine running the Remote Desktop client, stop it from pausing the session while minimized:
     reg add "HKCU\Software\Microsoft\Terminal Server Client" /v RemoteDesktop_SuppressWhenMinimized /t REG_DWORD /d 2 /f
     (then reconnect), or keep the RDP window restored (not minimized).
-  - Until then, use window-level fallbacks: screenshot --window ... and click/move/scroll/type/key --window ...
+  - Chrome (and other Chromium/Electron apps) need an interactive display: fix the RDP client first.
+    Until then, screenshot --window ... still captures windows; posted --window input only reaches classic Win32 apps.
 ```
 
 ### monitors, cursor, wait
@@ -381,16 +397,17 @@ agent-desktop screenshot -o shots\after-reload.png
 Check the after screenshot before going further: a wrong click on this page
 can remove or disable an extension.
 
-If `doctor` reports a session with no display (minimized RDP client), run
-the same loop against the window: `screenshot --window hwnd:<HWND>`, then
-`click PX PY --window hwnd:<HWND>`, where PX PY are pixels of that window
-screenshot. The click is posted to Chrome's page widget. To open the page
-without `ctrl+t`, click the address bar with
-`click AX AY --window hwnd:<HWND>`. Then run
-`type "chrome://extensions" --window hwnd:<HWND> --at AX,AY` and
-`key enter --window hwnd:<HWND> --at AX,AY`. Passing `--at` sends the keys to
-the toolbar's window (the top-level Chrome window) instead of the page
-widget.
+**This recipe needs an interactive display.** If `doctor` does not say
+`status: ok` (for example the RDP client is minimized), fix the display
+first, because Chrome ignores posted `--window` input. The fix is to set
+`RemoteDesktop_SuppressWhenMinimized=2` on the RDP client machine and
+reconnect, or to keep the RDP window restored.
+
+Re-check the target right before clicking. Something else, such as a
+browser-automation bridge, can switch tabs or windows between your
+screenshot and your click. Run `--json windows --filter chrome`, confirm the
+target window has `"foreground": true`, take a fresh screenshot, and click
+only if the button is still at the same pixel.
 
 ## Troubleshooting
 
@@ -400,7 +417,10 @@ Start with `agent-desktop doctor`.
   foreground window**: the session is not rendering. Usually the Remote
   Desktop client is minimized. Either set `RemoteDesktop_SuppressWhenMinimized=2`
   on the client machine (see `doctor`) and reconnect, or keep the RDP window
-  restored. In the meantime, use `--window` screenshots and input.
+  restored. In the meantime, `--window` screenshots work, and `--window`
+  input reaches classic Win32 apps but not Chrome.
+- **`key` fails with `no key combos given`**: you are on 88b238d or older,
+  which had a helper bug. Update.
 - **`SendInput was blocked`**: the workstation is locked, or the target
   window runs elevated (as admin). Windows does not let a normal-user process
   send input to elevated windows (UIPI). Run the target app without

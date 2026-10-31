@@ -58,3 +58,11 @@ test('C# helper has the no-display fallbacks', () => {
   assert.match(src, /GetForegroundWindow\(\) == IntPtr\.Zero/);
   assert.match(src, /case "doctor": return Doctor\(\);/);
 });
+
+test('C# helper reads JSON arrays as IList, never ArrayList (live bug: key always failed)', () => {
+  // JavaScriptSerializer.DeserializeObject returns object[] for JSON arrays,
+  // so "as ArrayList" is always null and "(ArrayList)" throws.
+  const src = fs.readFileSync(CS, 'utf8').replace(/\/\/.*$/gm, '');
+  assert.doesNotMatch(src, /ArrayList/);
+  assert.match(src, /IList combos = Get\(req, "combos"\) as IList;/);
+});
