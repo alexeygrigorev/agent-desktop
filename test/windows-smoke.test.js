@@ -74,3 +74,35 @@ test('move then cursor returns the exact pixel', { skip }, () => {
   assert.deepEqual(moved.cursor, target);
   assert.deepEqual(cli('cursor').cursor, target);
 });
+
+test('doctor reports an interactive session on the CI desktop', { skip }, () => {
+  const res = cli('doctor');
+  console.log(JSON.stringify(res));
+  assert.ok(['ok', 'degraded'].includes(res.status));
+  assert.equal(typeof res.sessionId, 'number');
+  assert.equal(res.capture.printWindow.ok, true);
+});
+
+test('screenshot --method printwindow composites the virtual screen', { skip }, (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-desktop-smoke-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const res = cli('screenshot', '--method', 'printwindow', '-o', path.join(dir, 'pw.png'));
+  assert.equal(res.method, 'printwindow-composite');
+  assert.ok(res.composited >= 1);
+  assert.deepEqual(pngSize(res.path), { width: res.virtualScreen.width, height: res.virtualScreen.height });
+});
+
+test('screenshot --window and posted input use the same window-relative pixels', { skip }, (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-desktop-smoke-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const win = cli('windows').windows.find((w) => !w.minimized && w.rect.width > 50 && w.rect.height > 50);
+  assert.ok(win, 'a visible window to test with');
+  const shot = cli('screenshot', '--window', `hwnd:${win.hwnd}`, '-o', path.join(dir, 'win.png'));
+  assert.equal(shot.method, 'printwindow');
+  assert.deepEqual(shot.origin, { x: win.rect.x, y: win.rect.y });
+  assert.deepEqual(pngSize(shot.path), { width: win.rect.width, height: win.rect.height });
+  const moved = cli('move', '20', '30', '--window', `hwnd:${win.hwnd}`, '--input', 'post');
+  assert.equal(moved.input, 'postmessage');
+  assert.deepEqual(moved.point, { x: win.rect.x + 20, y: win.rect.y + 30 });
+  console.log(JSON.stringify(moved));
+});

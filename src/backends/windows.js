@@ -87,6 +87,7 @@ function createWindowsBackend(options = {}) {
     focus: (p) => call('focus', p),
     monitors: () => call('monitors', {}),
     cursor: () => call('cursor', {}),
+    doctor: () => call('doctor', {}),
   };
 }
 

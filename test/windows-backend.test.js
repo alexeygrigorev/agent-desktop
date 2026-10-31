@@ -48,3 +48,13 @@ test('C# helper sets per-monitor-v2 DPI awareness and uses the virtual desktop',
   // Same normalisation formula as src/coords.js.
   assert.match(src, /Math\.Ceiling\(offset \* 65536\.0 \/ size\)/);
 });
+
+test('C# helper has the no-display fallbacks', () => {
+  const src = fs.readFileSync(CS, 'utf8');
+  assert.match(src, /PrintWindow\(hWnd, hdc, PW_RENDERFULLCONTENT\)/);
+  assert.match(src, /const uint PW_RENDERFULLCONTENT = 2;/);
+  assert.match(src, /"printwindow-composite"/);
+  assert.match(src, /Post\(child, WM_CHAR/);
+  assert.match(src, /GetForegroundWindow\(\) == IntPtr\.Zero/);
+  assert.match(src, /case "doctor": return Doctor\(\);/);
+});

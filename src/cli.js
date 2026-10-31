@@ -7,6 +7,7 @@ const path = require('node:path');
 const { parseCombo } = require('./keys');
 const { parseInteger, parsePoint, imageToScreen } = require('./coords');
 const { selectBackendName, createBackend } = require('./backends');
+const { diagnose } = require('./doctor');
 
 const VERSION = require('../package.json').version;
 
@@ -15,24 +16,30 @@ const USAGE = `agent-desktop ${VERSION} - OS-level desktop control for agents
 Usage: agent-desktop [--json] [--backend windows|mock] <command> [args]
 
 Commands:
-  screenshot [--output PATH] [--monitor N | --all]
-                                 Capture the whole virtual screen (default) or one
-                                 monitor to a PNG; parent dirs are created.
-  click [X Y] [--button left|right|middle] [--count N] [--offset X,Y]
+  screenshot [--output PATH] [--monitor N | --all | --window W] [--method auto|screen|printwindow]
+                                 Capture the whole virtual screen (default), one
+                                 monitor or one window to a PNG; parent dirs are
+                                 created. Falls back to PrintWindow when the
+                                 screen cannot be read (e.g. minimized RDP client).
+  click [X Y] [--button left|right|middle] [--count N] [--offset X,Y] [--window W]
                                  Click at X Y (or at the current cursor position).
-  move X Y [--offset X,Y]        Move the mouse.
+  move X Y [--offset X,Y] [--window W]
+                                 Move the mouse.
   drag X1 Y1 X2 Y2 [--button B] [--steps N] [--duration MS] [--offset X,Y]
                                  Press at X1 Y1, move to X2 Y2, release.
-  scroll DY [--dx DX] [--at X,Y] Scroll DY wheel notches (positive = down).
-  type TEXT [--delay MS] [--stdin]
+  scroll DY [--dx DX] [--at X,Y] [--window W]
+                                 Scroll DY wheel notches (positive = down).
+  type TEXT [--delay MS] [--stdin] [--window W [--at X,Y]]
                                  Type text as unicode keystrokes (\\n = Enter).
-  key COMBO [COMBO...] [--delay MS]
+  key COMBO [COMBO...] [--delay MS] [--window W [--at X,Y]]
                                  Press key combos, e.g. ctrl+shift+t, alt+f4, enter.
   windows [--filter TEXT] [--all]
                                  List top-level windows (Z-order, topmost first).
   focus <TITLE-SUBSTRING|PID> [--title] [--hwnd]
                                  Restore and bring a window to the foreground.
   monitors                       List monitors and the virtual-screen bounds.
+  doctor                         Diagnose the session (RDP/console, foreground,
+                                 input desktop, capture and input methods).
   cursor                         Print the current cursor position.
   wait MS                        Sleep MS milliseconds.
 
@@ -46,22 +53,32 @@ Global options:
 Coordinates are physical virtual-screen pixels (DPI-aware, multi-monitor).
 A screenshot reports its "origin"; image pixel (px,py) is screen point
 (px+origin.x, py+origin.y), which "--offset ORIGIN_X,ORIGIN_Y" applies for you.
+
+--window W targets one window: W is a title substring, a pid or hwnd (bare
+number: hwnd if one matches, else pid), or explicit "hwnd:N", "pid:N",
+"title:TEXT". With --window, X Y are pixels of "screenshot --window W".
+--input auto|sendinput|post: auto uses SendInput, and posts window messages
+to the --window target when there is no interactive display.
 `;
 
 // Options each command accepts: name -> 'bool' | 'value'. Short aliases map
 // to long names.
 const COMMANDS = {
-  screenshot: { options: { output: 'value', monitor: 'value', all: 'bool' }, aliases: { o: 'output' } },
-  click: { options: { button: 'value', count: 'value', offset: 'value' } },
-  move: { options: { offset: 'value' } },
+  screenshot: {
+    options: { output: 'value', monitor: 'value', all: 'bool', window: 'value', method: 'value' },
+    aliases: { o: 'output' },
+  },
+  click: { options: { button: 'value', count: 'value', offset: 'value', window: 'value', input: 'value' } },
+  move: { options: { offset: 'value', window: 'value', input: 'value' } },
   drag: { options: { button: 'value', steps: 'value', duration: 'value', offset: 'value' } },
-  scroll: { options: { dx: 'value', at: 'value', offset: 'value' } },
-  type: { options: { delay: 'value', stdin: 'bool' } },
-  key: { options: { delay: 'value' } },
+  scroll: { options: { dx: 'value', at: 'value', offset: 'value', window: 'value', input: 'value' } },
+  type: { options: { delay: 'value', stdin: 'bool', window: 'value', input: 'value', at: 'value' } },
+  key: { options: { delay: 'value', window: 'value', input: 'value', at: 'value' } },
   windows: { options: { filter: 'value', all: 'bool' } },
   focus: { options: { title: 'bool', hwnd: 'bool' } },
   monitors: { options: {} },
   cursor: { options: {} },
+  doctor: { options: {} },
   wait: { options: {} },
   help: { options: {} },
 };
@@ -165,6 +182,44 @@ function parseNonNegative(value, what, dflt) {
   return n;
 }
 
+// --window value -> { hwnd } | { pid } | { title } | { id } (bare number:
+// the backend tries it as an hwnd, then as a pid).
+function parseWindowTarget(value) {
+  const v = String(value);
+  let m = /^hwnd:(0x[0-9a-f]+|\d+)$/i.exec(v);
+  if (m) return { hwnd: Number(m[1]) };
+  m = /^pid:(\d+)$/i.exec(v);
+  if (m) return { pid: Number(m[1]) };
+  m = /^title:(.*)$/is.exec(v);
+  const title = m ? m[1] : v;
+  if (!m && /^\d+$/.test(v)) return { id: Number(v) };
+  if (title.trim() === '') throw new UsageError('--window needs a title, pid or hwnd');
+  return { title };
+}
+
+const INPUT_MODES = ['auto', 'sendinput', 'post'];
+const CAPTURE_METHODS = ['auto', 'screen', 'printwindow'];
+
+// Shared --window / --input handling for input commands.
+function inputTarget(opt) {
+  const params = {};
+  if (opt.window !== undefined) params.window = parseWindowTarget(opt.window);
+  if (opt.input !== undefined) {
+    const mode = opt.input.toLowerCase();
+    if (!INPUT_MODES.includes(mode)) throw new UsageError(`--input must be one of ${INPUT_MODES.join(', ')}, got "${opt.input}"`);
+    if (mode === 'post' && !params.window) throw new UsageError('--input post needs --window');
+    params.input = mode;
+  }
+  return params;
+}
+
+// --at X,Y for type/key picks the child window that receives posted keys.
+function keyTargetPoint(opt) {
+  if (opt.at === undefined) return {};
+  if (opt.window === undefined) throw new UsageError('--at needs --window for type/key');
+  return parsePoint(opt.at, '--at');
+}
+
 function point(xs, ys, offset) {
   const p = { x: parseInteger(xs, 'X'), y: parseInteger(ys, 'Y') };
   return offset ? imageToScreen(p, parsePoint(offset, '--offset')) : p;
@@ -201,12 +256,20 @@ function buildRequest(parsed, ctx = {}) {
   const { command, positionals: pos, options: opt } = parsed;
   switch (command) {
     case 'screenshot': {
-      expectPositionals(pos, 0, 0, 'screenshot [--output PATH] [--monitor N | --all]');
-      if (opt.all && opt.monitor !== undefined) throw new UsageError('use either --monitor or --all, not both');
+      expectPositionals(pos, 0, 0, 'screenshot [--output PATH] [--monitor N | --all | --window W]');
+      if ([opt.all, opt.monitor !== undefined, opt.window !== undefined].filter(Boolean).length > 1) {
+        throw new UsageError('use only one of --monitor, --all, --window');
+      }
       const monitor = parsePositive(opt.monitor, '--monitor', undefined);
       const output = opt.output || defaultScreenshotPath(ctx.now);
       const params = { output: path.resolve(ctx.cwd || process.cwd(), output) };
       if (monitor !== undefined) params.monitor = monitor;
+      if (opt.window !== undefined) params.window = parseWindowTarget(opt.window);
+      if (opt.method !== undefined) {
+        const m = opt.method.toLowerCase();
+        if (!CAPTURE_METHODS.includes(m)) throw new UsageError(`--method must be one of ${CAPTURE_METHODS.join(', ')}, got "${opt.method}"`);
+        params.method = m;
+      }
       return { method: 'screenshot', params };
     }
     case 'click': {
@@ -214,11 +277,11 @@ function buildRequest(parsed, ctx = {}) {
       const params = { button: parseButton(opt.button), count: parsePositive(opt.count, '--count', 1) };
       if (pos.length === 2) Object.assign(params, point(pos[0], pos[1], opt.offset));
       else if (opt.offset) throw new UsageError('--offset needs X Y');
-      return { method: 'click', params };
+      return { method: 'click', params: { ...params, ...inputTarget(opt) } };
     }
     case 'move':
       expectPositionals(pos, 2, 2, 'move X Y');
-      return { method: 'move', params: point(pos[0], pos[1], opt.offset) };
+      return { method: 'move', params: { ...point(pos[0], pos[1], opt.offset), ...inputTarget(opt) } };
     case 'drag': {
       expectPositionals(pos, 4, 4, 'drag X1 Y1 X2 Y2');
       const a = point(pos[0], pos[1], opt.offset);
@@ -242,7 +305,7 @@ function buildRequest(parsed, ctx = {}) {
       } else if (opt.offset) {
         throw new UsageError('--offset needs --at');
       }
-      return { method: 'scroll', params };
+      return { method: 'scroll', params: { ...params, ...inputTarget(opt) } };
     }
     case 'type': {
       let text;
@@ -253,7 +316,10 @@ function buildRequest(parsed, ctx = {}) {
         if (pos.length === 0) throw new UsageError('usage: agent-desktop type TEXT');
         text = pos.join(' ');
       }
-      return { method: 'type', params: { text, delay: parseNonNegative(opt.delay, '--delay', 0) } };
+      return {
+        method: 'type',
+        params: { text, delay: parseNonNegative(opt.delay, '--delay', 0), ...inputTarget(opt), ...keyTargetPoint(opt) },
+      };
     }
     case 'key': {
       if (pos.length === 0) throw new UsageError('usage: agent-desktop key COMBO [COMBO...]');
@@ -263,7 +329,10 @@ function buildRequest(parsed, ctx = {}) {
       } catch (e) {
         throw new UsageError(e.message);
       }
-      return { method: 'key', params: { combos, delay: parseNonNegative(opt.delay, '--delay', 30) } };
+      return {
+        method: 'key',
+        params: { combos, delay: parseNonNegative(opt.delay, '--delay', 30), ...inputTarget(opt), ...keyTargetPoint(opt) },
+      };
     }
     case 'windows':
       expectPositionals(pos, 0, 0, 'windows [--filter TEXT] [--all]');
@@ -283,6 +352,9 @@ function buildRequest(parsed, ctx = {}) {
     case 'cursor':
       expectPositionals(pos, 0, 0, 'cursor');
       return { method: 'cursor', params: {} };
+    case 'doctor':
+      expectPositionals(pos, 0, 0, 'doctor');
+      return { method: 'doctor', params: {} };
     case 'wait': {
       expectPositionals(pos, 1, 1, 'wait MS');
       return { method: null, waitMs: parseNonNegative(pos[0], 'MS', 0) };
@@ -300,23 +372,59 @@ function fmtRect(r) {
   return `${r.width}x${r.height} at ${fmtPoint(r)}`;
 }
 
+function where(result) {
+  return result.cursor || result.point || { x: '?', y: '?' };
+}
+
+function via(result) {
+  if (result.input !== 'postmessage') return '';
+  return ` (posted to ${result.targetHwnd} ${result.targetClass})`;
+}
+
+function formatDoctor(r) {
+  const cap = r.capture || {};
+  const ok = (c) => (c && c.ok ? 'ok' : `FAILED${c && c.error ? ` (${c.error})` : ''}`);
+  const lines = [
+    `status: ${r.status}`,
+    `session: id=${r.sessionId} name=${r.sessionName || '?'} state=${r.connectState || '?'} ` +
+      `${r.remote ? 'remote (RDP)' : 'local/console'}; console session id=${r.consoleSessionId}`,
+    `foreground window: ${r.foregroundHwnd ? `${r.foregroundHwnd} "${r.foregroundTitle || ''}"` : 'none (0)'}`,
+    `input desktop: ${r.inputDesktop || `not accessible${r.inputDesktopError ? ` (${r.inputDesktopError})` : ''}`}`,
+    `screen capture (BitBlt): ${ok(cap.screen)}`,
+    `window capture (PrintWindow): ${ok(cap.printWindow)}` +
+      (cap.printWindow && cap.printWindow.hwnd ? ` tested on "${cap.printWindow.title}"` : '') +
+      (cap.printWindow && cap.printWindow.blank ? ' [image blank]' : ''),
+    `SendInput: ${ok(r.sendInput)}`,
+    `DPI awareness: ${r.dpiAwareness || '?'}`,
+  ];
+  if (r.problems.length) lines.push('problems:', ...r.problems.map((p) => `  - ${p}`));
+  lines.push('hints:', ...r.hints.map((h) => `  - ${h}`));
+  return lines.join('\n');
+}
+
 function formatText(command, result) {
   switch (command) {
-    case 'screenshot':
-      return `${result.path}\n${result.width}x${result.height}, origin ${fmtPoint(result.origin)}` +
-        (result.monitor ? `, monitor ${result.monitor}` : ', all monitors');
+    case 'screenshot': {
+      let scope = result.monitor ? `monitor ${result.monitor}` : 'all monitors';
+      if (result.window) scope = `window ${result.window.hwnd} "${result.window.title}"`;
+      return `${result.path}\n${result.width}x${result.height}, origin ${fmtPoint(result.origin)}, ${scope}` +
+        (result.method ? `, via ${result.method}` : '');
+    }
     case 'click':
-      return `clicked ${result.button}${result.count > 1 ? ` x${result.count}` : ''} at ${fmtPoint(result.cursor)}`;
+      return `clicked ${result.button}${result.count > 1 ? ` x${result.count}` : ''} at ${fmtPoint(where(result))}${via(result)}`;
     case 'move':
+      return result.cursor ? `cursor ${fmtPoint(result.cursor)}${via(result)}` : `moved to ${fmtPoint(where(result))}${via(result)}`;
     case 'drag':
     case 'cursor':
       return `cursor ${fmtPoint(result.cursor)}`;
     case 'scroll':
-      return `scrolled dy=${result.dy} dx=${result.dx} at ${fmtPoint(result.cursor)}`;
+      return `scrolled dy=${result.dy} dx=${result.dx} at ${fmtPoint(where(result))}${via(result)}`;
     case 'type':
-      return `typed ${result.typed} chars`;
+      return `typed ${result.typed} chars${via(result)}`;
     case 'key':
-      return `pressed ${result.combos} combo${result.combos === 1 ? '' : 's'}`;
+      return `pressed ${result.combos} combo${result.combos === 1 ? '' : 's'}${via(result)}`;
+    case 'doctor':
+      return formatDoctor(result);
     case 'windows':
       if (result.windows.length === 0) return '(no windows)';
       return result.windows
@@ -385,10 +493,14 @@ async function main(argv, io = {}) {
         (io.createBackend || createBackend)(selectBackendName(parsed.global.backend));
       result = await backend[request.method](request.params);
       if (parsed.command === 'windows') result = filterWindows(result, parsed.options.filter);
+      if (parsed.command === 'doctor') result = { ...result, ...diagnose(result) };
     }
 
     if (json) stdout.write(`${JSON.stringify({ ok: true, command: parsed.command, ...result })}\n`);
-    else stdout.write(`${formatText(parsed.command, result)}\n`);
+    else {
+      stdout.write(`${formatText(parsed.command, result)}\n`);
+      for (const w of result.warnings || []) stderr.write(`agent-desktop: warning: ${w}\n`);
+    }
     return 0;
   } catch (err) {
     const usage = err instanceof UsageError;
@@ -402,6 +514,7 @@ module.exports = {
   main,
   parseArgs,
   buildRequest,
+  parseWindowTarget,
   formatText,
   prepareOutputPath,
   defaultScreenshotPath,

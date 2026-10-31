@@ -14,6 +14,10 @@ focusing windows. It covers what browser automation cannot reach:
   to a click with no scaling.
 - Every command accepts `--json` and prints a single JSON object for agents
   to read.
+- Works even when nothing is being displayed, for example a minimized
+  Remote Desktop client. Screenshots fall back to PrintWindow, and input can
+  be posted straight to a window with `--window`. `agent-desktop doctor`
+  explains what state the session is in.
 
 The backend is pluggable (`src/backends/`). Windows is the only real one so
 far. A `mock` backend handles tests and dry runs on any OS.
@@ -91,13 +95,27 @@ With `--json`, an error prints `{"ok":false,"error":"..."}`.
 ### screenshot
 
 ```text
-agent-desktop screenshot [--output PATH] [--monitor N | --all]
+agent-desktop screenshot [--output PATH] [--monitor N | --all | --window W]
+                         [--method auto|screen|printwindow]
 ```
 
-Captures the whole virtual screen (the default, same as `--all`) or monitor
-`N` (1 = primary, then left to right) as a PNG. Missing parent directories
-are created. Without `--output`, the file goes to
+Captures the whole virtual screen (the default, same as `--all`), monitor
+`N` (1 = primary, then left to right), or a single window (`--window`, see
+[Window targets](#window-targets-and-no-display-sessions)) as a PNG.
+Missing parent directories are created. Without `--output`, the file goes to
 `%TEMP%\agent-desktop\screenshot-<timestamp>.png`.
+
+The JSON output has a `method` field:
+
+| `method` | When |
+| --- | --- |
+| `screen` | Normal BitBlt of the screen. |
+| `printwindow-composite` | BitBlt failed, e.g. with `The handle is invalid` when the RDP client is minimized. Every visible window is captured with `PrintWindow` and painted bottom-up onto a canvas the size of the requested area. Menus, tooltips and the taskbar may be missing, and `warnings` says so. |
+| `printwindow` | `--window`: just that window, which works even if it is covered or not in the foreground. A minimized window has to be restored first. |
+
+`--method screen` disables the fallback, and `--method printwindow` forces
+it. If the image is a single flat colour, `blank` is `true` and a warning
+suggests running `doctor`.
 
 ```powershell
 agent-desktop screenshot --output C:\work\shots\desk.png
@@ -241,6 +259,87 @@ agent-desktop focus 4242
 agent-desktop focus 132456 --hwnd
 ```
 
+### Window targets and no-display sessions
+
+```text
+--window W     W = title substring | pid | hwnd   (also explicit hwnd:N, pid:N, title:TEXT;
+               a bare number is tried as an hwnd first, then as a pid)
+--input auto|sendinput|post
+```
+
+`click`, `move`, `scroll`, `type` and `key` accept `--window`. With it,
+**coordinates are relative to the window**: they are pixels in
+`screenshot --window W`, whose `origin` is the top-left corner of the
+window's visible frame. The flow is the same as on the full screen:
+screenshot the window, find the pixel, click that pixel.
+
+The input path is chosen by `--input`:
+
+- `auto` (default): use SendInput, as without `--window`. The point is
+  converted to screen pixels, and for `type`/`key` the window is focused
+  first. When there is **no interactive display**, the input is posted to
+  the window instead. No interactive display means there is no foreground
+  window or the input desktop cannot be opened, as with a minimized RDP
+  client or a locked session. Input is also posted when SendInput is
+  rejected. In those cases the output has `"input":"postmessage"` and a
+  `fallbackReason`.
+- `post`: always post window messages. `click`/`move`/`scroll` go to the
+  deepest visible child window under the point, for example Chrome's
+  `Chrome_RenderWidgetHostHWND`. They are sent as `WM_MOUSEMOVE`,
+  `WM_LBUTTONDOWN`/`UP` (likewise for the other buttons, plus
+  `DBLCLK` for `--count 2`) and `WM_MOUSEWHEEL`, with client coordinates.
+  `type` sends `WM_CHAR`. `key` sends `WM_KEYDOWN`/`UP`, or
+  `WM_SYSKEYDOWN`/`UP` when the combo includes Alt. Keys go to the window's
+  focused child, or to the child under `--at X,Y` (window-relative).
+- `sendinput`: never fall back.
+
+Posted input has limits. The app does not see a real cursor, and posted
+modifiers do not change its keyboard state. That means plain clicks, text
+and keys such as Enter, Tab and the arrows work, but shortcuts like
+`ctrl+t` may reach the app as a bare `t`; a warning in the output says so.
+Without `--window`, input in a no-display session also gets a warning,
+because SendInput may report success while doing nothing.
+
+```powershell
+agent-desktop --json screenshot --window "Google Chrome" -o shots\chrome.png
+#   -> "method":"printwindow","origin":{"x":120,"y":40},"window":{"hwnd":132456,...}
+agent-desktop click 1212 655 --window hwnd:132456          # pixel from chrome.png
+agent-desktop type "chrome://extensions" --window hwnd:132456 --at 400,60
+agent-desktop key enter --window hwnd:132456 --input post
+```
+
+### doctor
+
+```text
+agent-desktop doctor
+```
+
+Prints the session state: session id and name (`Console` or `RDP-Tcp#N`),
+connection state, remote or console, the foreground window, the input
+desktop, whether BitBlt screen capture, PrintWindow capture and SendInput
+work, and DPI awareness. It ends with a `status` (`ok`, `degraded` or
+`unusable`) and hints. `--json` returns the raw facts plus `status`,
+`problems` and `hints`.
+
+```text
+> agent-desktop doctor
+status: degraded
+session: id=2 name=RDP-Tcp#0 state=active remote (RDP); console session id=1
+foreground window: none (0)
+input desktop: Default
+screen capture (BitBlt): FAILED (The handle is invalid)
+window capture (PrintWindow): ok tested on "Extensions - Google Chrome"
+SendInput: ok
+problems:
+  - Remote Desktop session is not rendering (RDP client minimized or not drawing)
+  - screen capture (BitBlt) fails: The handle is invalid
+hints:
+  - On the machine running the Remote Desktop client, stop it from pausing the session while minimized:
+    reg add "HKCU\Software\Microsoft\Terminal Server Client" /v RemoteDesktop_SuppressWhenMinimized /t REG_DWORD /d 2 /f
+    (then reconnect), or keep the RDP window restored (not minimized).
+  - Until then, use window-level fallbacks: screenshot --window ... and click/move/scroll/type/key --window ...
+```
+
 ### monitors, cursor, wait
 
 ```powershell
@@ -282,8 +381,26 @@ agent-desktop screenshot -o shots\after-reload.png
 Check the after screenshot before going further: a wrong click on this page
 can remove or disable an extension.
 
+If `doctor` reports a session with no display (minimized RDP client), run
+the same loop against the window: `screenshot --window hwnd:<HWND>`, then
+`click PX PY --window hwnd:<HWND>`, where PX PY are pixels of that window
+screenshot. The click is posted to Chrome's page widget. To open the page
+without `ctrl+t`, click the address bar with
+`click AX AY --window hwnd:<HWND>`. Then run
+`type "chrome://extensions" --window hwnd:<HWND> --at AX,AY` and
+`key enter --window hwnd:<HWND> --at AX,AY`. Passing `--at` sends the keys to
+the toolbar's window (the top-level Chrome window) instead of the page
+widget.
+
 ## Troubleshooting
 
+Start with `agent-desktop doctor`.
+
+- **`The handle is invalid` / `method: printwindow-composite` / no
+  foreground window**: the session is not rendering. Usually the Remote
+  Desktop client is minimized. Either set `RemoteDesktop_SuppressWhenMinimized=2`
+  on the client machine (see `doctor`) and reconnect, or keep the RDP window
+  restored. In the meantime, use `--window` screenshots and input.
 - **`SendInput was blocked`**: the workstation is locked, or the target
   window runs elevated (as admin). Windows does not let a normal-user process
   send input to elevated windows (UIPI). Run the target app without
@@ -308,13 +425,15 @@ bin/agent-desktop.js        CLI entry
 src/cli.js                  argument parsing, validation, output (text / --json)
 src/keys.js                 key-combo parser -> virtual-key codes
 src/coords.js               image <-> screen mapping, SendInput normalisation
+src/doctor.js               session facts -> status, problems, hints
 src/backends/index.js       backend selection
 src/backends/mock.js        in-memory backend for tests and dry runs
 src/backends/windows.js     spawns Windows PowerShell 5.1 per command
 src/backends/windows/helper.ps1     compiles + caches the C# helper, runs one request
 src/backends/windows/AgentDesktop.cs  P/Invoke: SetProcessDpiAwarenessContext,
                                       SendInput, EnumWindows, SetForegroundWindow,
-                                      EnumDisplayMonitors, CopyFromScreen
+                                      EnumDisplayMonitors, CopyFromScreen,
+                                      PrintWindow, PostMessage, WTS session info
 ```
 
 Requests and responses travel between Node and PowerShell as base64 UTF-8
