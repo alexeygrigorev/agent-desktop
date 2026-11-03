@@ -14,6 +14,9 @@ const HELPER = path.join(__dirname, 'windows', 'helper.ps1');
 const RESULT_PREFIX = 'AGENT_DESKTOP_RESULT:';
 // Keep well under the 32K Windows command-line limit.
 const MAX_INLINE_REQUEST = 8000;
+const DEFAULT_HELPER_TIMEOUT_MS = 60000;
+const HELPER_TIMEOUT_BUFFER_MS = 30000;
+const MAX_HELPER_TIMEOUT_MS = 0x7fffffff;
 
 function powershellPath() {
   if (process.env.AGENT_DESKTOP_POWERSHELL) return process.env.AGENT_DESKTOP_POWERSHELL;
@@ -35,7 +38,23 @@ function encodeRequest(request) {
   return Buffer.from(JSON.stringify(request), 'utf8').toString('base64');
 }
 
-function runHelper(request, { timeoutMs = 60000 } = {}) {
+function timeoutForRequest(request, minimum = DEFAULT_HELPER_TIMEOUT_MS) {
+  let requestedMs = 0;
+  if (request.command === 'drag') {
+    requestedMs = Math.max(0, Number(request.duration) || 0);
+  } else if (request.command === 'type') {
+    const chars = String(request.text || '').length;
+    const delay = Math.max(0, Number(request.delay) || 0);
+    requestedMs = chars * Math.max(delay, 2);
+  } else if (request.command === 'key') {
+    const combos = Array.isArray(request.combos) ? request.combos.length : 0;
+    requestedMs = Math.max(0, Number(request.delay) || 0) * Math.max(0, combos - 1);
+  }
+  return Math.min(MAX_HELPER_TIMEOUT_MS, Math.max(minimum, requestedMs + HELPER_TIMEOUT_BUFFER_MS));
+}
+
+function runHelper(request, { timeoutMs } = {}) {
+  const effectiveTimeout = timeoutMs === undefined ? timeoutForRequest(request) : timeoutMs;
   const encoded = encodeRequest(request);
   const args = ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', HELPER];
   let tmpDir = null;
@@ -51,7 +70,7 @@ function runHelper(request, { timeoutMs = 60000 } = {}) {
     execFile(
       powershellPath(),
       args,
-      { windowsHide: true, timeout: timeoutMs, maxBuffer: 64 * 1024 * 1024 },
+      { windowsHide: true, timeout: effectiveTimeout, maxBuffer: 64 * 1024 * 1024 },
       (err, stdout, stderr) => {
         if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
         let result = null;
@@ -91,4 +110,4 @@ function createWindowsBackend(options = {}) {
   };
 }
 
-module.exports = { createWindowsBackend, parseHelperOutput, encodeRequest, HELPER };
+module.exports = { createWindowsBackend, parseHelperOutput, encodeRequest, timeoutForRequest, HELPER };

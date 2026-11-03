@@ -7,7 +7,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const { parseHelperOutput, encodeRequest, HELPER } = require('../src/backends/windows');
+const { parseHelperOutput, encodeRequest, timeoutForRequest, HELPER } = require('../src/backends/windows');
 
 const CS = path.join(__dirname, '..', 'src', 'backends', 'windows', 'AgentDesktop.cs');
 
@@ -27,6 +27,13 @@ test('helper output is found among other lines and decoded as UTF-8', () => {
 test('helper files exist next to the backend', () => {
   assert.ok(fs.existsSync(HELPER));
   assert.ok(fs.existsSync(CS));
+});
+
+test('helper timeout covers requested long input durations', () => {
+  assert.equal(timeoutForRequest({ command: 'type', text: 'x'.repeat(1000), delay: 100 }), 130000);
+  assert.equal(timeoutForRequest({ command: 'drag', duration: 90000 }), 120000);
+  assert.equal(timeoutForRequest({ command: 'key', combos: [[], [], []], delay: 20000 }), 70000);
+  assert.equal(timeoutForRequest({ command: 'doctor' }), 60000);
 });
 
 test('C# helper stays compatible with Windows PowerShell 5.1 Add-Type (C# 5)', () => {
@@ -65,4 +72,10 @@ test('C# helper reads JSON arrays as IList, never ArrayList (live bug: key alway
   const src = fs.readFileSync(CS, 'utf8').replace(/\/\/.*$/gm, '');
   assert.doesNotMatch(src, /ArrayList/);
   assert.match(src, /IList combos = Get\(req, "combos"\) as IList;/);
+});
+
+test('window-targeted SendInput clicks foreground the target before clicking', () => {
+  const src = fs.readFileSync(CS, 'utf8');
+  assert.match(src, /static Dictionary<string, object> ClickSend[\s\S]*?FocusForInput\(target\);/);
+  assert.match(src, /static void FocusForInput\(WindowData target\)/);
 });
