@@ -826,6 +826,7 @@ namespace AgentDesktop
 
         static Dictionary<string, object> ClickSend(Dictionary<string, object> req, WindowData target)
         {
+            FocusForInput(target);
             if (Has(req, "x"))
             {
                 POINT p = ScreenPoint(req, target);
@@ -944,8 +945,9 @@ namespace AgentDesktop
             Send(KeyInput(vk, 0, 0), KeyInput(vk, 0, KEYEVENTF_KEYUP));
         }
 
-        // SendInput keyboard needs the target in the foreground.
-        static void FocusForKeys(WindowData target)
+        // SendInput needs the target in the foreground so coordinates and
+        // keystrokes cannot be delivered to a window covering the target.
+        static void FocusForInput(WindowData target)
         {
             if (target == null) return;
             if (IsIconic(target.Handle)) ShowWindow(target.Handle, SW_RESTORE);
@@ -1005,7 +1007,7 @@ namespace AgentDesktop
 
         static Dictionary<string, object> TypeSend(Dictionary<string, object> req, WindowData target)
         {
-            FocusForKeys(target);
+            FocusForInput(target);
             string text = Str(req, "text", "").Replace("\r\n", "\n");
             int delay = Math.Max(0, Int(req, "delay", 0));
             foreach (char c in text)
@@ -1053,7 +1055,7 @@ namespace AgentDesktop
 
         static Dictionary<string, object> KeySend(Dictionary<string, object> req, WindowData target)
         {
-            FocusForKeys(target);
+            FocusForInput(target);
             IList combos = (IList)Get(req, "combos");
             int delay = Math.Max(0, Int(req, "delay", 30));
             for (int c = 0; c < combos.Count; c++)
